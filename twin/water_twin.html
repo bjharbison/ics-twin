@@ -9,6 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="lib/twin3d-kit.js"></script>
+<script src="lib/water-scene3d.js"></script>
 <style>
   :root{
     --bg:#0a0e14; --panel:#0f151e; --panel-2:#131b26; --line:#1e2a3a;
@@ -119,6 +120,13 @@
   @media (max-width:860px){
     .app{grid-template-columns:1fr;grid-template-rows:auto 44vh 1fr}
     aside{border-left:0;border-top:1px solid var(--line)}
+    /* header spans a single column here; without this it forces a phantom
+       second column and squeezes the stage to a sliver on phones */
+    header{grid-column:1;flex-wrap:wrap;gap:8px 10px;padding:10px 14px}
+    .brand .sub{display:none}
+    .seg button{padding:7px 10px}
+    .hint{display:none}
+    .navpad{right:8px;bottom:8px}
   }
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
@@ -416,82 +424,40 @@ function renderSVG(dt){
 /* ============================================================
    3D RENDERER (three.js via twin3d-kit)
 ============================================================ */
-let renderer,scene,camera,content,nav,tankWater3d,pump3d,pumpMat3d,inFlow3d=[],outFlow3d=[],mode='25d',glReady=false;
-const TANK_H=120, TANK_R=48;
+let renderer,scene,camera,content,nav,plant,mode='25d',glReady=false;
 function init3D(){
   const glWrap=document.getElementById('glWrap');
   renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
   renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+  Twin3D.setupRenderer(renderer);                 // soft shadows
   glWrap.appendChild(renderer.domElement);
   scene=new THREE.Scene();
-  camera=new THREE.PerspectiveCamera(45,1,0.1,2000);
-  Twin3D.addLighting(scene);
+  camera=new THREE.PerspectiveCamera(42,1,1,4000);
+  Twin3D.addLighting(scene,{ambient:0.8, hemi:0.7, key:1.2, fill:0.45, rim:0.45, fog:0.0011, shadows:360});
   content=new THREE.Group(); scene.add(content);
 
-  // ground
-  const grid=new THREE.GridHelper(520,16,0x1e2a3a,0x141d28); grid.position.y=0; content.add(grid);
+  // The plant itself lives in lib/water-scene3d.js. It holds no physics: it is
+  // driven every frame from state.truth via plant.update() below.
+  plant=WaterScene3D.build(scene,content);
+  const fb=WaterScene3D.FOCUS, focusBox=new THREE.Box3(new THREE.Vector3(...fb[0]),new THREE.Vector3(...fb[1]));
 
-  // storage tank — shell + inner water cylinder (scaled on Y)
-  const shellMat=new THREE.MeshStandardMaterial({color:0x2a3850,metalness:.5,roughness:.5,transparent:true,opacity:.28,side:THREE.DoubleSide});
-  const shellMesh=new THREE.Mesh(new THREE.CylinderGeometry(TANK_R,TANK_R,TANK_H,40,1,true),shellMat);
-  shellMesh.position.y=TANK_H/2; content.add(shellMesh);
-  const topRing=new THREE.Mesh(new THREE.TorusGeometry(TANK_R,1.2,8,40),Twin3D.equipMaterial(0x3a4c63));
-  topRing.rotation.x=Math.PI/2; topRing.position.y=TANK_H; content.add(topRing);
-  const waterMat=new THREE.MeshStandardMaterial({color:0x3bd6f2,metalness:.2,roughness:.3,transparent:true,opacity:.6,emissive:0x113a44,emissiveIntensity:.6});
-  tankWater3d=new THREE.Mesh(new THREE.CylinderGeometry(TANK_R-2,TANK_R-2,TANK_H,36),waterMat);
-  tankWater3d.position.y=TANK_H/2; content.add(tankWater3d);
-
-  // NaOH dosing tank
-  const dose=new THREE.Mesh(new THREE.CylinderGeometry(16,16,70,24),Twin3D.equipMaterial(0x6a5bd0,{emissive:0x241d55,emissiveIntensity:.5}));
-  dose.position.set(-150,35,-110); content.add(dose);
-
-  // pump block
-  pumpMat3d=Twin3D.equipMaterial(0x3fae6a,{emissive:0x0f3a22,emissiveIntensity:.5});
-  pump3d=new THREE.Mesh(new THREE.BoxGeometry(55,42,46),pumpMat3d);
-  pump3d.position.set(-150,21,120); content.add(pump3d);
-
-  // pipes (thin cylinders) + flow beads
-  function pipe(a,b,color){
-    const va=new THREE.Vector3(...a),vb=new THREE.Vector3(...b);
-    const len=va.distanceTo(vb); const geo=new THREE.CylinderGeometry(3,3,len,12);
-    const m=new THREE.Mesh(geo,Twin3D.equipMaterial(color||0x2b5566));
-    m.position.copy(va.clone().add(vb).multiplyScalar(.5));
-    m.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),vb.clone().sub(va).normalize());
-    content.add(m); return {va,vb,mesh:m};
-  }
-  pipe([-150,30,120],[-150,30,0]); const ip=pipe([-150,30,0],[0,30,0]);
-  const op=pipe([0,30,0],[180,30,0]);
-  // flow beads along in/out pipes
-  function beads(seg,arr){ for(let i=0;i<5;i++){ const b=new THREE.Mesh(new THREE.SphereGeometry(4,10,10),new THREE.MeshBasicMaterial({color:0xeaf6ff})); content.add(b); arr.push({b,seg,ph:i/5}); } }
-  beads(ip,inFlow3d); beads(op,outFlow3d);
-
-  nav=Twin3D.createOrbitNav({THREE,camera,dom:glWrap,navpadEl:document.getElementById('navpad'),focus:()=>content,
-    home:{az:-0.9,el:0.5,r:360,tx:0,ty:60,tz:0}});
+  nav=Twin3D.createOrbitNav({THREE,camera,dom:glWrap,navpadEl:document.getElementById('navpad'),focus:()=>focusBox,
+    home:Twin3D.homeFor(WaterScene3D.HOME,(glWrap.clientWidth||1400)/(glWrap.clientHeight||800)),
+    views:WaterScene3D.VIEWS, rMin:120, rMax:1400});
   const s=document.createElement('style'); s.textContent=Twin3D.navpadCSS(); document.head.appendChild(s);
   glReady=true; sizeGL();
 }
-function sizeGL(){ if(!glReady) return; const w=document.getElementById('glWrap').clientWidth,h=document.getElementById('glWrap').clientHeight; if(!w||!h) return; renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix(); }
-let beadT=0;
+function sizeGL(){
+  if(!glReady) return;
+  const w=document.getElementById('glWrap').clientWidth,h=document.getElementById('glWrap').clientHeight; if(!w||!h) return;
+  renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix();
+  plant.setLabelScale(Twin3D.labelScale(w,h,camera.fov));
+}
 function render3D(dt){
   if(!glReady) return;
   const t=state.truth;
-  const lv=clamp(t.tank/100,0.02,1);
-  tankWater3d.scale.y=lv; tankWater3d.position.y=(TANK_H*lv)/2;
-  const low=t.tank<40;
-  tankWater3d.material.color.setHex(low?0xff4d5e:0x3bd6f2);
-  tankWater3d.material.emissive.setHex(low?0x3a1116:0x113a44);
-  // pump colour
-  const on=t.pump===1;
-  pumpMat3d.color.setHex(on?0x3fae6a:0xff4d5e); pumpMat3d.emissive.setHex(on?0x0f3a22:0x3a1116);
-  // flow beads
-  const spd=clamp(t.flow/46,0,1.4); beadT+=dt*spd*0.25;
-  const flowing=t.flow>2;
-  [...inFlow3d,...outFlow3d].forEach(o=>{
-    o.b.visible=flowing;
-    if(!flowing) return;
-    let f=(o.ph+beadT)%1; const p=o.seg.va.clone().lerp(o.seg.vb,f);
-    o.b.position.copy(p);
-  });
+  plant.update({naoh:t.naoh, flow:t.flow, tank:t.tank, pump:t.pump, pressure:t.pressure,
+    demand:state.demand, alarms:truthAlarms().length}, dt);
   nav.update(); renderer.render(scene,camera);
 }
 
@@ -518,7 +484,7 @@ function setMode(m){
   document.getElementById('mode3d').classList.toggle('active',m==='3d');
   svgWrapEl.style.display = m==='25d'?'block':'none';
   glWrapEl.style.display  = m==='3d'?'block':'none';
-  document.getElementById('hint').textContent = m==='3d'?'Drag to orbit · scroll to zoom':'Isometric · flow speed ∝ throughput';
+  document.getElementById('hint').textContent = m==='3d'?'Drag to orbit · scroll / pinch to zoom · shift-drag to pan':'Isometric · flow speed ∝ throughput';
   if(m==='3d'){ if(!glReady) init3D(); sizeGL(); nav&&nav.setVisible(true); }
   else nav&&nav.setVisible(false);
 }
@@ -544,7 +510,7 @@ const liveNote=document.getElementById('liveNote');
   };
 });
 
-setMode('25d');
+setMode(location.hash==='#3d'?'3d':'25d');   // twin/water_twin.html#3d opens straight into the plant
 </script>
 </body>
 </html>

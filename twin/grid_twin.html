@@ -9,6 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="lib/twin3d-kit.js"></script>
+<script src="lib/grid-scene3d.js"></script>
 <style>
   :root{
     --bg:#0a0e14; --panel:#0f151e; --panel-2:#131b26; --line:#1e2a3a;
@@ -153,6 +154,13 @@
   @media (max-width:820px){
     .app{grid-template-columns:1fr;grid-template-rows:auto 46vh 1fr}
     aside{border-left:0;border-top:1px solid var(--line)}
+    /* header spans a single column here; without this it forces a phantom
+       second column and squeezes the stage to a sliver on phones */
+    header{grid-column:1;flex-wrap:wrap;gap:8px 10px;padding:10px 14px}
+    .brand .sub{display:none}
+    .seg button{padding:7px 10px}
+    .hint{display:none}
+    .navpad{right:8px;bottom:8px}
   }
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
@@ -639,85 +647,30 @@ let renderer,scene,cam3d, three={ready:false};
 function initThree(){
   renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
   renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+  Twin3D.setupRenderer(renderer);                 // soft shadows
   glWrap.appendChild(renderer.domElement);
   scene=new THREE.Scene();
-  scene.fog=new THREE.FogExp2(0x0a0e14,0.0025);
-  cam3d=new THREE.PerspectiveCamera(45,1,0.1,2000);
+  cam3d=new THREE.PerspectiveCamera(42,1,1,4000);
 
-  // Shared lighting baseline (twin3d-kit.js) — this project's default three.js
-  // scenes kept coming out too dark; these are the corrected values, now
-  // canonical so future twins (water, datacenter, pipeline) start here instead
-  // of re-deriving it. Values are identical to what this file used inline
-  // before the extraction — verified constant-for-constant.
-  Twin3D.addLighting(scene, {fog:0}); // fog already set above with this file's own color
+  // Shared lighting (twin3d-kit.js). The yard model is larger and uses
+  // mid-tone materials with cast shadows, so ambient is eased back from the
+  // kit's flat baseline to let form and shadow read; still well clear of the
+  // "too dark" failure the baseline exists to prevent.
+  Twin3D.addLighting(scene, {ambient:0.8, hemi:0.7, key:1.2, fill:0.45, rim:0.45, fog:0.0011, shadows:340});
 
-  // Orbit/nav pad, shared via twin3d-kit.js. Constructed here (not at
-  // top-level script scope like the original inline version) because it
-  // captures `cam3d` by reference at call time, and cam3d doesn't exist
-  // until this function runs. focus() is a lazy callback, so it's fine that
-  // three.content doesn't exist yet at this point in initThree().
+  three.content=new THREE.Group(); scene.add(three.content);   // equipment only (for centering/fit)
+  // The yard itself: every part lives in lib/grid-scene3d.js and is driven
+  // from the one shared `state` object via yard.update() — no physics there.
+  three.yard=GridScene3D.build(scene, three.content);
+  three.focus=new THREE.Box3(new THREE.Vector3(-250,0,-70), new THREE.Vector3(225,112,70));
+
   three.nav = Twin3D.createOrbitNav({
     THREE, camera: cam3d, dom: glWrap,
     navpadEl: document.getElementById('navpad'),
-    focus: () => three.content,
+    focus: () => three.focus,
+    home: Twin3D.homeFor(GridScene3D.HOME, (glWrap.clientWidth||1400)/(glWrap.clientHeight||800)),
+    views: GridScene3D.VIEWS, rMin: 120, rMax: 1300,
   });
-
-  // ground grid
-  const grid=new THREE.GridHelper(600,30,0x3a516d,0x223047);
-  grid.material.opacity=0.6; grid.material.transparent=true; scene.add(grid);
-  three.content=new THREE.Group(); scene.add(three.content);   // equipment only (for centering/fit)
-
-  const phaseHex=[0xf2a63b,0x3bd6f2,0xe04ff2];
-  const zRow=[-34,0,34];
-  const segX=[-150,-30,70,180];
-
-  three.busBase=[]; three.flow=[]; three.arm=[]; three.busDown=[];
-  // busbars per phase
-  for(let p=0;p<3;p++){
-    // upstream + downstream cylinders
-    [[segX[0],segX[1],false],[segX[1],segX[3],true]].forEach(([xa,xb,down])=>{
-      const len=xb-xa;
-      const geo=new THREE.CylinderGeometry(1.6,1.6,len,10);
-      const mat=new THREE.MeshStandardMaterial({color:phaseHex[p],emissive:phaseHex[p],emissiveIntensity:0.55,metalness:0.4,roughness:0.5});
-      const bar=new THREE.Mesh(geo,mat);
-      bar.rotation.z=Math.PI/2; bar.position.set((xa+xb)/2,52,zRow[p]);
-      three.content.add(bar); three.busBase.push({mesh:bar,mat,down,p});
-    });
-    // flow pips (small emissive spheres travelling downstream buses)
-    const pips=[];
-    for(let k=0;k<5;k++){
-      const s=new THREE.Mesh(new THREE.SphereGeometry(2.4,10,10),
-        new THREE.MeshBasicMaterial({color:0xffffff}));
-      s.position.y=52; s.position.z=zRow[p]; three.content.add(s);
-      pips.push({mesh:s,off:k/5});
-    }
-    three.flow.push({pips,p,x0:segX[1],x1:segX[3]});
-    // supports
-    [segX[0],segX[3]].forEach(x=>{
-      const post=new THREE.Mesh(new THREE.CylinderGeometry(1.4,1.6,52,8),
-        new THREE.MeshStandardMaterial({color:0x4a5f78,metalness:0.55,roughness:0.55}));
-      post.position.set(x,26,zRow[p]); three.content.add(post);
-    });
-    // breaker unit at segX[1]
-    const hous=new THREE.Mesh(new THREE.BoxGeometry(10,20,10),
-      new THREE.MeshStandardMaterial({color:0x33445c,metalness:0.5,roughness:0.5}));
-    hous.position.set(segX[1],52,zRow[p]); three.content.add(hous);
-    const arm=new THREE.Mesh(new THREE.CylinderGeometry(1.4,1.4,18,8),
-      new THREE.MeshStandardMaterial({color:phaseHex[p],emissive:phaseHex[p],emissiveIntensity:0.7}));
-    arm.position.set(segX[1],52,zRow[p]); three.content.add(arm);
-    three.arm.push({mesh:arm,p,baseY:52});
-  }
-
-  // transformer
-  const xg=new THREE.BoxGeometry(46,44,80);
-  three.xfmrMat=new THREE.MeshStandardMaterial({color:0x2c5470,emissive:0x2fd4c4,emissiveIntensity:0.2,metalness:0.3,roughness:0.5});
-  const xf=new THREE.Mesh(xg,three.xfmrMat); xf.position.set(segX[2],28,0); three.content.add(xf);
-  // radiator fins
-  for(let i=-2;i<=2;i++){
-    const fin=new THREE.Mesh(new THREE.BoxGeometry(3,40,80),
-      new THREE.MeshStandardMaterial({color:0x274155,metalness:0.4,roughness:0.6}));
-    fin.position.set(segX[2]+27, 28, i*14); three.content.add(fin);
-  }
   three.ready=true;
   resize3d();
 }
@@ -726,44 +679,16 @@ function resize3d(){
   if(!renderer)return;
   const w=glWrap.clientWidth||glWrap.parentElement.clientWidth, h=glWrap.clientHeight||glWrap.parentElement.clientHeight;
   renderer.setSize(w,h,false); cam3d.aspect=w/h; cam3d.updateProjectionMatrix();
+  // labels are constant-screen-size sprites; give short (phone) stages a bigger share
+  if(three.yard) three.yard.setLabelScale(Twin3D.labelScale(w,h,cam3d.fov));
 }
 window.addEventListener('resize',resize3d);
 
-function heatEmissive(t){ // returns {color,intensity}
-  const rgb=heatColor(t).match(/\d+/g).map(Number);
-  return {color:(rgb[0]<<16)|(rgb[1]<<8)|rgb[2], intensity:0.18+clamp((t-50)/34,0,1)*0.9};
-}
 function renderThree(dt){
   if(!three.ready)return;
-  const iAvg=(state.I[0]+state.I[1]+state.I[2])/3;
-  const flow=clamp(iAvg/350,0,1);
-  // buses: emissive (voltage presence) holds; downstream loses flow not glow
-  three.busBase.forEach(b=>{
-    b.mat.emissiveIntensity = (!b.down||state.breakerClosed)?0.55:0.4;
-  });
-  // flow pips travel only on downstream when closed
-  three.flow.forEach(f=>{
-    const on = state.breakerClosed && flow>0.02;
-    f.pips.forEach(p=>{
-      p.mesh.visible=on;
-      if(on){
-        p.off=(p.off + flow*0.5*dt)%1;
-        p.mesh.position.x=f.x0+(f.x1-f.x0)*p.off;
-        p.mesh.material.opacity=1;
-      }
-    });
-  });
-  // breaker armature lifts + reddens when open
-  three.arm.forEach(a=>{
-    const targetY=state.breakerClosed?a.baseY:a.baseY+13;
-    a.mesh.position.y += (targetY-a.mesh.position.y)*Math.min(1,6*dt);
-    const c=state.breakerClosed?[0xf2a63b,0x3bd6f2,0xe04ff2][a.p]:0xff4d5e;
-    a.mesh.material.color.setHex(c); a.mesh.material.emissive.setHex(c);
-  });
-  // transformer heat
-  const he=heatEmissive(state.temp);
-  three.xfmrMat.emissive.setHex(he.color);
-  three.xfmrMat.emissiveIntensity += (he.intensity-three.xfmrMat.emissiveIntensity)*Math.min(1,3*dt);
+  // one view-model, straight from shared state (sim, live and replay alike)
+  three.yard.update({V:state.V, I:state.I, temp:state.temp,
+    breakerClosed:state.breakerClosed, realKw:state.realKw}, dt);
   three.nav.update();
   renderer.render(scene,cam3d);
 }
@@ -1041,7 +966,7 @@ function setMode(m){
   b25.classList.toggle('active',m==='25'); b3d.classList.toggle('active',m==='3d');
   svgWrap.style.display=m==='25'?'block':'none';
   glWrap.style.display=m==='3d'?'block':'none';
-  hint.textContent = m==='3d' ? 'Drag to orbit · scroll to zoom · buttons for presets' : 'Isometric one-line · flow speed ∝ current';
+  hint.textContent = m==='3d' ? 'Drag to orbit · scroll / pinch to zoom · shift-drag to pan' : 'Isometric one-line · flow speed ∝ current';
   document.getElementById('navpad').classList.toggle('on', m==='3d');
   if(m==='3d'){ if(!renderer) initThree(); resize3d(); }
 }
@@ -1115,7 +1040,7 @@ function loop(now){
   updatePill();
   requestAnimationFrame(loop);
 }
-setMode('25');
+setMode(location.hash==='#3d'?'3d':'25');   // twin/grid_twin.html#3d opens straight into the yard
 requestAnimationFrame(loop);
 </script>
 </body>
